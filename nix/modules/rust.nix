@@ -5,13 +5,13 @@
     inputs.rust-flake.flakeModules.nixpkgs
   ];
   perSystem = { config, self', pkgs, lib, ... }: {
-    rust-project.crates."webserv".crane.args = {
+    rust-project.crates."multilayer-perceptron".crane.args = {
       buildInputs = lib.optionals pkgs.stdenv.isDarwin (
         with pkgs.darwin.apple_sdk.frameworks; [
           IOKit
         ]
       );
     };
-    packages.default = self'.packages.webserv;
+    packages.default = self'.packages.multilayer-perceptron;
   };
 }
