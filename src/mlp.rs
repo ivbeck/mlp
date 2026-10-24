@@ -220,43 +220,7 @@ impl MultilayerPerceptron {
         for epoch in 0..config.epochs {
             debug!("Starting epoch {}/{}", epoch + 1, config.epochs);
 
-            // Shuffle data if requested
-            let epoch_data = if config.shuffle {
-                train_data.shuffle()
-            } else {
-                train_data.clone()
-            };
-
-            // Create mini-batches
-            let batches = epoch_data.create_batches(config.batch_size);
-            let mut epoch_loss = 0.0;
-
-            // Train on each batch
-            for (batch_idx, batch) in batches.iter().enumerate() {
-                let mut batch_loss = 0.0;
-
-                for sample_idx in 0..batch.num_samples() {
-                    let input = batch.features.row(sample_idx).to_owned();
-                    let target = Array1::from_elem(1, batch.labels[sample_idx]);
-
-                    // Forward and backward pass
-                    self.forward(&input);
-                    let loss = self.backward(&target)?;
-                    batch_loss += loss;
-                }
-
-                batch_loss /= batch.num_samples() as f64;
-                epoch_loss += batch_loss;
-
-                debug!(
-                    "Batch {}/{} loss: {:.6}",
-                    batch_idx + 1,
-                    batches.len(),
-                    batch_loss
-                );
-            }
-
-            epoch_loss /= batches.len() as f64;
+            let epoch_loss = self.train_epoch(&train_data, config.batch_size, config.shuffle)?;
             metrics.train_losses.push(epoch_loss);
 
             // Validate if validation data is available
@@ -301,6 +265,75 @@ impl MultilayerPerceptron {
 
         info!("Training completed");
         Ok(metrics)
+    }
+
+    /// Run one epoch of mini-batch training over `data` and return the mean batch loss
+    ///
+    /// This is what [`Self::train`] does per epoch, exposed so callers can drive
+    /// training step by step (pause, resume, stream progress).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a backward pass fails
+    #[allow(clippy::cast_precision_loss)]
+    pub fn train_epoch(&mut self, data: &Dataset, batch_size: usize, shuffle: bool) -> Result<f64> {
+        let epoch_data = if shuffle {
+            data.shuffle()
+        } else {
+            data.clone()
+        };
+
+        let batches = epoch_data.create_batches(batch_size.max(1));
+        if batches.is_empty() {
+            anyhow::bail!("No training samples");
+        }
+        let mut epoch_loss = 0.0;
+
+        for (batch_idx, batch) in batches.iter().enumerate() {
+            let mut batch_loss = 0.0;
+
+            for sample_idx in 0..batch.num_samples() {
+                let input = batch.features.row(sample_idx).to_owned();
+                let target = Array1::from_elem(1, batch.labels[sample_idx]);
+
+                // Forward and backward pass
+                self.forward(&input);
+                let loss = self.backward(&target)?;
+                batch_loss += loss;
+            }
+
+            batch_loss /= batch.num_samples() as f64;
+            epoch_loss += batch_loss;
+
+            debug!(
+                "Batch {}/{} loss: {:.6}",
+                batch_idx + 1,
+                batches.len(),
+                batch_loss
+            );
+        }
+
+        Ok(epoch_loss / batches.len() as f64)
+    }
+
+    /// Forward pass that returns the output of every layer, last one is the network output
+    pub fn forward_trace(&mut self, input: &Array1<f64>) -> Vec<Array1<f64>> {
+        let mut outputs = Vec::with_capacity(self.layers.len());
+        let mut current_input = input.clone();
+
+        for layer in &mut self.layers {
+            current_input = layer.forward(&current_input);
+            outputs.push(current_input.clone());
+        }
+
+        self.last_output = Some(current_input);
+        outputs
+    }
+
+    /// The layers of the network, input side first
+    #[must_use]
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
     }
 
     /// Evaluate the network on a dataset

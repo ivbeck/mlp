@@ -1,0 +1,40 @@
+[package]
+authors = ["Iven Beck <ivbeck@mail.uni-mannheim.de>"]
+edition = "2021"
+name = "mlp-console"
+description = "Local web console for training multilayer-perceptron models"
+version = "0.1.0"
+
+[dependencies]
+multilayer-perceptron = { path = ".." }
+anyhow = "1.0"
+axum = { version = "0.8.9", features = ["ws"] }
+clap = { version = "4.5.40", features = ["derive"] }
+csv = "1.3.0"
+mime_guess = "2.0.5"
+ndarray = "0.16.0"
+rust-embed = "8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.45.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3"
+
+[lints.rust]
+unsafe_code = "deny"
+unused = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+unwrap_in_result = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+clone_on_ref_ptr = "warn"
+use_self = "warn"
+# false positives on short guarded blocks, every lock here is scoped already
+significant_drop_tightening = "allow"

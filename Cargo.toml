@@ -1,3 +1,6 @@
+[workspace]
+members = ["web"]
+
 [package]
 authors = ["Iven Beck <ivbeck@mail.uni-mannheim.de>"]
 edition = "2021"
@@ -55,7 +58,7 @@ missing_errors_doc = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
 enum_glob_use = "deny"
-match-wild-err-arm = "warn"
+match_wild_err_arm = "warn"
 significant_drop_in_scrutinee = "warn"
 clone_on_ref_ptr = "warn"
 use_self = "warn"

@@ -4,3 +4,9 @@
 .direnv
 
 /.pre-commit-config.yaml
+
+# impeccable scratch: decision mocks and review captures
+/.impeccable/mocks/
+/.impeccable/review/
+/.impeccable/build/
+/data/
