@@ -44,6 +44,30 @@ cargo build --release
   --learning-rate 0.01
 ```
 
+## Web Console
+
+`web/` holds `mlp-console`, a local web ui for the same crate: load a CSV, pick the target
+column, build the network, watch it train epoch by epoch and probe the result. Training runs
+natively in the server process and every epoch is streamed to the browser over a WebSocket,
+so the numbers are exactly what the library computes. Data never leaves the machine.
+
+```bash
+just console                      # builds web/ui, then serves http://127.0.0.1:7878
+just console --bind 0.0.0.0:7878  # other machines too, there is no login
+```
+
+By hand: `cd web/ui && npm ci && npm run build`, then `cargo run --release -p mlp-console`.
+For frontend work run the server and `npm run dev` in `web/ui` (vite proxies `/api`).
+
+- **Data:** column stats, constant columns flagged, target picked, optional shuffle before
+  the validation split (the CLI splits off the last rows in file order).
+- **Network:** hidden layers, activations, output activation, loss, optimizer and every
+  other CLI option. The library trains a single output neuron, so multi-class targets run
+  as regression.
+- **Train:** the prediction over two chosen features drawn as a contour map with the 0.5
+  boundary as a front, a loss chart you can scrub back through, pause, step and stop.
+- **Probe:** click the map or type inputs, read the output and every layer's activations.
+
 ## CLI Usage
 
 ### Basic Training

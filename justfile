@@ -12,3 +12,11 @@ run *ARGS:
 # Run 'bacon' to run the project (auto-recompiles)
 watch *ARGS:
 	bacon --job run -- -- {{ ARGS }}
+
+# Build the web console frontend (web/ui/dist, embedded into mlp-console)
+console-ui:
+    cd web/ui && npm ci && npm run build
+
+# Run the web console on http://127.0.0.1:7878
+console *ARGS: console-ui
+    cargo run --release -p mlp-console -- {{ARGS}}

@@ -61,10 +61,23 @@ impl Dataset {
         target_column: usize,
         has_header: bool,
     ) -> Result<Self> {
+        let file = std::fs::File::open(path.as_ref()).context("Failed to open CSV file")?;
+        Self::from_csv_reader(file, target_column, has_header)
+    }
+
+    /// Load dataset from anything that reads CSV text (an upload, a byte slice)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data cannot be read or parsed
+    pub fn from_csv_reader<R: std::io::Read>(
+        source: R,
+        target_column: usize,
+        has_header: bool,
+    ) -> Result<Self> {
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(has_header)
-            .from_path(path.as_ref())
-            .context("Failed to open CSV file")?;
+            .from_reader(source);
 
         let mut all_data: Vec<Vec<f64>> = Vec::new();
 
