@@ -3,7 +3,7 @@ import { Surface } from "../charts/Surface";
 import { activeRun, control, isLive, selectRun, set, setPlane, startRun, type State, type View } from "../store";
 import { LOSSES, OPTIMIZERS, fmt, fmtInt, label } from "../util";
 import { DraftSettings } from "./Settings";
-import { ChartKey, PlaneSelect, STATE_TEXT, archLine, runFeatures, stationsFor } from "./shared";
+import { ChartKey, PlaneSelect, STATE_TEXT, archLine, stationsFor, targetRange } from "./shared";
 
 const LOSS_SHORT: Record<string, string> = { bce: "BCE", mse: "MSE", mae: "MAE", huber: "Huber" };
 
@@ -41,14 +41,15 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
   const field = frame?.field ?? null;
   const shownEpoch = s.scrub ?? last?.epoch ?? 0;
   const rec = run.history.find((r) => r.epoch === shownEpoch) ?? last;
-  const feats = runFeatures(s.dataset, sum);
-  const xc = field ? feats[field.x] : undefined;
-  const yc = field ? feats[field.y] : undefined;
-  const target = s.dataset?.columns[c.target];
-  const plane: [number, number] = field ? [field.x, field.y] : s.plane;
+  const nums = sum.inputs.filter((i) => i.kind === "numeric");
+  const xc = field ? sum.inputs[field.x] : undefined;
+  const yc = field ? sum.inputs[field.y] : undefined;
+  const sameData = !!s.dataset && s.dataset.id === c.dataset_id;
+  const plane: [number, number] = xc && yc ? [xc.index, yc.index] : s.plane;
+  const vRange: [number, number] = sameData ? targetRange(s.dataset!, c.target, sum.target) : [0, 1];
   const others = s.runs.filter((r) => r !== run && r.summary.config.loss === c.loss && r.summary.config.dataset_id === c.dataset_id);
   const progress = last ? last.epoch / c.epochs : 0;
-  const stations = field && xc && yc ? stationsFor(s.dataset!, xc.index, yc.index, c.target) : [];
+  const stations = field && xc && yc && sameData ? stationsFor(s.dataset!, xc.index, yc.index, c.target, sum.target) : [];
   const controls = live ? (
     <div class="btns">
       {sum.state === "running" ? (
@@ -81,30 +82,30 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
             Surface analysis · <b>epoch {shownEpoch}</b>
           </h1>
           <span class="meta">
-            {sum.binary_target ? "p(y = 1)" : `predicted ${sum.target_name}`}
+            {sum.target.kind === "binary" ? `p(${sum.target_name} = ${sum.target.one})` : `predicted ${sum.target_name}`}
             {xc && yc && ` over ${xc.name}, ${yc.name}`}
-            {feats.length > 2 && " · other features at their mean"}
+            {sum.inputs.length > 2 && " · other numbers at their mean, categories at their most common value"}
           </span>
-          <PlaneSelect feats={sum.features.map((name) => ({ name }))} plane={plane} onChange={(p) => void setPlane(p)} />
+          <PlaneSelect feats={nums} plane={plane} onChange={(p) => void setPlane(p)} />
         </div>
-        {field && target ? (
+        {field ? (
           <Surface
             field={field}
             stations={stations}
             binary={sum.binary_target}
             xRange={field.x_range}
             yRange={field.y_range}
-            vRange={[target.min, target.max]}
-            xName={xc?.name ?? sum.features[field.x] ?? "x"}
-            yName={yc?.name ?? sum.features[field.y] ?? "y"}
+            vRange={vRange}
+            xName={xc?.name ?? "x"}
+            yName={yc?.name ?? "y"}
             height={470}
             label={`Prediction field at epoch ${shownEpoch}`}
           />
         ) : (
           <div class="empty tall">
             <p>
-              {sum.features.length < 2
-                ? "One feature only, so there is no plane to draw. The barograph below still tracks the run."
+              {nums.length < 2
+                ? "The chart needs two inputs used as numbers. The barograph below still tracks the run."
                 : "Waiting for the first field from the server."}
             </p>
           </div>
@@ -161,7 +162,7 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
             <p class={n.level === "warn" ? "note warn" : "note"}>{n.text}</p>
           ))}
         </section>
-        {field && target && <ChartKey binary={sum.binary_target} stations={stations} vRange={[target.min, target.max]} targetName={sum.target_name} />}
+        {field && <ChartKey spec={sum.target} stations={stations} vRange={vRange} targetName={sum.target_name} />}
         {s.runs.length > 1 && (
           <section>
             <div class="lab">Runs</div>

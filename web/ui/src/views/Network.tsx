@@ -7,7 +7,8 @@ const MAX_DRAWN = 12;
 
 export function NetworkView({ s }: { s: State }) {
   const d = s.draft;
-  const inputs = featureColumns(s).length;
+  const cols = featureColumns(s).length;
+  const inputs = s.encoding?.names.length ?? cols;
   const sizes = [inputs, ...d.hidden.map((h) => h.size), 1];
   const params = sizes.slice(1).reduce((n, out, i) => n + sizes[i]! * out + out, 0);
   const run = activeRun(s);
@@ -46,7 +47,9 @@ export function NetworkView({ s }: { s: State }) {
             <span class="ln">In</span>
             <span class="lname">Input</span>
             <span class="lsize">{inputs}</span>
-            <span class="muted">one per feature, set by the data</span>
+            <span class="muted">
+              {inputs === cols ? "one per feature column, set by the data" : `from ${cols} columns, categories one-hot (set on the Data tab)`}
+            </span>
           </div>
           {d.hidden.map((h, i) => (
             <div class="layer" role="listitem">

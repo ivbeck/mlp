@@ -2,27 +2,30 @@ import { useEffect } from "preact/hooks";
 import { Surface } from "../charts/Surface";
 import { activeRun, probe, setPlane, type State } from "../store";
 import { ACTIVATIONS, fmt, fmtP, label, useWidth } from "../util";
-import { ChartKey, PlaneSelect, runFeatures, stationsFor } from "./shared";
+import { ChartKey, KIND_TEXT, PlaneSelect, stationsFor, targetRange, targetValue } from "./shared";
 
 export function ProbeView({ s }: { s: State }) {
   const run = activeRun(s)!;
   const sum = run.summary;
   const c = sum.config;
-  const feats = runFeatures(s.dataset, sum);
-  const inputs = s.probe?.inputs ?? sum.feature_means;
+  const defaults = sum.inputs.map((i) => i.default);
+  const inputs = s.probe?.inputs ?? defaults;
   const result = s.probe?.result ?? null;
   const field = run.latest?.field ?? null;
-  const xc = field ? feats[field.x] : undefined;
-  const yc = field ? feats[field.y] : undefined;
-  const target = s.dataset?.columns[c.target];
-  const rows = s.dataset && s.dataset.id === c.dataset_id ? s.dataset.sample.slice(0, 200) : [];
+  const xc = field ? sum.inputs[field.x] : undefined;
+  const yc = field ? sum.inputs[field.y] : undefined;
+  const sameData = !!s.dataset && s.dataset.id === c.dataset_id;
+  const vRange: [number, number] = sameData ? targetRange(s.dataset!, c.target, sum.target) : [0, 1];
+  const rows = sameData ? s.dataset!.sample.slice(0, 200) : [];
+  const nums = sum.inputs.filter((i) => i.kind === "numeric");
+  const num = (v: number | string | undefined) => (typeof v === "number" ? v : Number(v));
   const out = result?.output ?? null;
 
   useEffect(() => {
-    if (!s.probe) void probe(sum.feature_means.slice());
+    if (!s.probe) void probe(defaults.slice());
   }, [sum.id]);
 
-  const setInput = (i: number, v: number) => {
+  const setInput = (i: number, v: number | string) => {
     const next = inputs.slice();
     next[i] = v;
     void probe(next);
@@ -42,20 +45,20 @@ export function ProbeView({ s }: { s: State }) {
                 ? "tap or drag on the chart"
                 : "click or drag on the chart"}
           </span>
-          <PlaneSelect feats={sum.features.map((name) => ({ name }))} plane={field ? [field.x, field.y] : s.plane} onChange={(p) => void setPlane(p)} />
+          <PlaneSelect feats={nums} plane={xc && yc ? [xc.index, yc.index] : s.plane} onChange={(p) => void setPlane(p)} />
         </div>
-        {field && target && (
+        {field && (
           <Surface
             field={field}
-            stations={xc && yc ? stationsFor(s.dataset!, xc.index, yc.index, c.target) : []}
+            stations={xc && yc && sameData ? stationsFor(s.dataset!, xc.index, yc.index, c.target, sum.target) : []}
             binary={sum.binary_target}
             xRange={field.x_range}
             yRange={field.y_range}
-            vRange={[target.min, target.max]}
-            xName={xc?.name ?? sum.features[field.x] ?? "x"}
-            yName={yc?.name ?? sum.features[field.y] ?? "y"}
+            vRange={vRange}
+            xName={xc?.name ?? "x"}
+            yName={yc?.name ?? "y"}
             height={420}
-            probe={[inputs[field.x] ?? 0, inputs[field.y] ?? 0]}
+            probe={[num(inputs[field.x]), num(inputs[field.y])]}
             onProbe={(x, y) => {
               const next = inputs.slice();
               next[field.x] = x;
@@ -69,27 +72,27 @@ export function ProbeView({ s }: { s: State }) {
           layers={result?.layers ?? null}
           sizes={sum.architecture}
           names={[...c.hidden.map((h) => h.activation), c.output_activation]}
-          outRange={sum.binary_target ? [0, 1] : target ? [target.min, target.max] : [0, 1]}
+          outRange={vRange}
           mid={sum.binary_target ? 0.5 : null}
         />
       </section>
       <aside class="side">
         <section class="verdict">
           <div class="ep">
-            <span class="ep-name">{sum.binary_target ? "p(y = 1)" : sum.target_name}</span>
+            <span class="ep-name">{sum.target.kind === "binary" ? `p(${sum.target_name} = ${sum.target.one})` : sum.target_name}</span>
             {sum.binary_target ? fmtP(out) : fmt(out, 4)}
           </div>
-          {sum.binary_target && out !== null && (
+          {sum.target.kind === "binary" && out !== null && (
             <>
               <div class="meter" aria-hidden="true">
                 <i style={{ left: `${Math.min(1, Math.max(0, out)) * 100}%` }} />
               </div>
-              <p class="net">Predicts class {out >= 0.5 ? 1 : 0}</p>
+              <p class="net">Predicts {sum.target_name} = {out >= 0.5 ? sum.target.one : sum.target.zero}</p>
             </>
           )}
           {s.probe?.row !== null && s.probe?.row !== undefined && (
             <p class="muted">
-              Row {s.probe.row}: actual {sum.target_name} = {fmt(rows[s.probe.row]?.[c.target], 3)}
+              Row {s.probe.row}: actual {sum.target_name} = {rows[s.probe.row]?.[c.target] ?? "–"}
             </p>
           )}
         </section>
@@ -102,13 +105,13 @@ export function ProbeView({ s }: { s: State }) {
                 const v = (e.currentTarget as HTMLSelectElement).value;
                 if (v === "") return;
                 const row = rows[+v]!;
-                void probe(feats.map((f) => row[f.index]!), +v);
+                void probe(sum.inputs.map((inp) => row[inp.index] ?? ""), +v);
               }}
             >
               <option value="">Choose a row</option>
               {rows.map((r, i) => (
                 <option value={i}>
-                  Row {i} · {sum.target_name} {fmt(r[c.target], 3)}
+                  Row {i} · {sum.target_name} {sum.target.kind === "binary" ? r[c.target] : fmt(targetValue(r[c.target], sum.target), 3)}
                 </option>
               ))}
             </select>
@@ -117,35 +120,50 @@ export function ProbeView({ s }: { s: State }) {
         <section>
           <div class="lab">Inputs, in file units</div>
           <div class="inputs">
-            {sum.features.map((name, i) => {
-              const [lo, hi] = sum.feature_ranges[i] ?? [0, 1];
+            {sum.inputs.map((inp, i) => {
+              const v = inputs[i];
               return (
                 <label class="field">
                   <span class="in-name">
-                    {name}
+                    {inp.name}
                     <span class="muted">
-                      {fmt(lo, 2)} to {fmt(hi, 2)}
+                      {inp.kind === "numeric" && inp.min !== null && inp.max !== null
+                        ? `${fmt(inp.min, 2)} to ${fmt(inp.max, 2)}`
+                        : inp.kind === "date"
+                          ? "YYYY-MM-DD"
+                          : `${KIND_TEXT[inp.kind].toLowerCase()}, ${inp.options.length} values`}
                     </span>
                   </span>
-                  <input
-                    type="number"
-                    step="any"
-                    value={+(inputs[i] ?? 0).toPrecision(6)}
-                    onChange={(e) => setInput(i, +(e.currentTarget as HTMLInputElement).value)}
-                  />
+                  {inp.kind === "numeric" ? (
+                    <input
+                      type="number"
+                      step="any"
+                      value={Number.isFinite(num(v)) ? +num(v).toPrecision(6) : ""}
+                      onChange={(e) => setInput(i, +(e.currentTarget as HTMLInputElement).value)}
+                    />
+                  ) : inp.kind === "date" ? (
+                    <input type="text" inputMode="numeric" value={String(v ?? "")} onChange={(e) => setInput(i, (e.currentTarget as HTMLInputElement).value)} />
+                  ) : (
+                    <select value={String(v ?? "")} onChange={(e) => setInput(i, (e.currentTarget as HTMLSelectElement).value)}>
+                      {!inp.options.includes(String(v ?? "")) && <option value={String(v ?? "")}>{String(v ?? "") || "(empty)"}</option>}
+                      {inp.options.map((o) => (
+                        <option value={o}>{o}</option>
+                      ))}
+                    </select>
+                  )}
                 </label>
               );
             })}
           </div>
-          <button class="link" onClick={() => void probe(sum.feature_means.slice())}>
-            Reset to the column means
+          <button class="link" onClick={() => void probe(defaults.slice())}>
+            Reset to means and most common values
           </button>
         </section>
-        {field && target && (
+        {field && (
           <ChartKey
-            binary={sum.binary_target}
-            stations={xc && yc ? stationsFor(s.dataset!, xc.index, yc.index, c.target) : []}
-            vRange={[target.min, target.max]}
+            spec={sum.target}
+            stations={xc && yc && sameData ? stationsFor(s.dataset!, xc.index, yc.index, c.target, sum.target) : []}
+            vRange={vRange}
             targetName={sum.target_name}
           />
         )}

@@ -1,17 +1,43 @@
 import { useState } from "preact/hooks";
+import type { ColumnInfo, Kind } from "../api";
 import { Surface } from "../charts/Surface";
-import { featureColumns, loadExample, loadFile, setDraft, setHeader, setPlane, setTarget, type State, type View } from "../store";
-import { bytes, fmt, fmtInt } from "../util";
-import { PlaneSelect, stationsFor } from "./shared";
+import {
+  kindOf,
+  loadExample,
+  loadFile,
+  numericColumns,
+  setDraft,
+  setHeader,
+  setKind,
+  setPlane,
+  setPositive,
+  setTarget,
+  type State,
+  type View,
+} from "../store";
+import { bytes, fmtInt, fmtShort } from "../util";
+import { KIND_TEXT, PlaneSelect, stationsFor, targetRange } from "./shared";
+
+function summary(c: ColumnInfo, rows: number): string {
+  if (c.min !== null && c.max !== null && c.categories.length > 2 && c.distinct > 12) {
+    return `${fmtShort(c.min)} to ${fmtShort(c.max)}, mean ${fmtShort(c.mean)}`;
+  }
+  const shown = c.categories.slice(0, 3).map(([v, n]) => `${v} ${Math.round((n / rows) * 100)}%`);
+  const rest = c.distinct - shown.length;
+  return shown.join(", ") + (rest > 0 ? `, ${rest} more` : "");
+}
 
 export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
   if (!s.dataset) return <Empty busy={!!s.busy} />;
   const d = s.dataset;
-  const feats = featureColumns(s);
+  const nums = numericColumns(s);
   const target = s.target !== null ? d.columns[s.target] : undefined;
-  const xc = feats[s.plane[0]];
-  const yc = feats[s.plane[1]] ?? xc;
-  const constant = feats.filter((c) => c.constant);
+  const spec = s.encoding?.target ?? null;
+  const xc = d.columns[s.plane[0]];
+  const yc = d.columns[s.plane[1]];
+  const canPlot = !!(xc && yc && target && xc !== yc && nums.includes(xc) && nums.includes(yc));
+  const enc = s.encoding;
+  const wide = enc?.inputs.filter((i) => i.width > 1) ?? [];
 
   return (
     <>
@@ -23,70 +49,80 @@ export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
           <span class="meta">
             {d.rows > d.sample.length ? `first ${fmtInt(d.sample.length)} of ${fmtInt(d.rows)} rows plotted` : `${fmtInt(d.rows)} rows plotted`}
           </span>
-          <PlaneSelect feats={feats} plane={s.plane} onChange={(p) => void setPlane(p)} />
+          <PlaneSelect feats={nums} plane={s.plane} onChange={(p) => void setPlane(p)} />
         </div>
-        {xc && yc && target ? (
+        {canPlot ? (
           <Surface
             field={null}
-            stations={stationsFor(d, xc.index, yc.index, target.index)}
-            binary={target.binary}
-            xRange={[xc.min, xc.max]}
-            yRange={[yc.min, yc.max]}
-            vRange={[target.min, target.max]}
+            stations={stationsFor(d, xc.index, yc.index, target.index, spec)}
+            binary={spec?.kind === "binary"}
+            xRange={[xc.min ?? 0, xc.max ?? 1]}
+            yRange={[yc.min ?? 0, yc.max ?? 1]}
+            vRange={targetRange(d, target.index, spec)}
             xName={xc.name}
             yName={yc.name}
             height={420}
             label={`Scatter of ${xc.name} against ${yc.name}, coloured by ${target.name}`}
           />
         ) : (
-          <p class="note">One feature only, there is no plane to draw. Training still works.</p>
+          <div class="empty">
+            <p>The chart needs two columns used as numbers. Training works without it.</p>
+          </div>
         )}
         <div class="table-wrap">
           <table class="cols">
-            <caption>Columns · pick the target the network should predict</caption>
+            <caption>Columns · pick the target, set how each column is read</caption>
             <thead>
               <tr>
                 <th scope="col">Target</th>
-                <th scope="col" class="num">#</th>
                 <th scope="col">Name</th>
-                <th scope="col" class="num">Min</th>
-                <th scope="col" class="num">Max</th>
-                <th scope="col" class="num">Mean</th>
-                <th scope="col" class="num">Std</th>
-                <th scope="col">Values</th>
+                <th scope="col">Used as</th>
+                <th scope="col" class="num">Missing</th>
+                <th scope="col" class="num">Values</th>
+                <th scope="col">Summary</th>
               </tr>
             </thead>
             <tbody>
-              {d.columns.map((c) => (
-                <tr class={c.index === s.target ? "sel" : ""} onClick={() => setTarget(c.index)}>
-                  <td>
-                    <input
-                      type="radio"
-                      name="target"
-                      checked={c.index === s.target}
-                      aria-label={`Use ${c.name} as target`}
-                      onChange={() => setTarget(c.index)}
-                    />
-                  </td>
-                  <td class="num">{c.index}</td>
-                  <td class="name">{c.name}</td>
-                  <td class="num">{fmt(c.min, 3)}</td>
-                  <td class="num">{fmt(c.max, 3)}</td>
-                  <td class="num">{fmt(c.mean, 3)}</td>
-                  <td class="num">{fmt(c.std, 3)}</td>
-                  <td>
-                    {c.constant ? (
-                      <span class="flag warm">constant</span>
-                    ) : c.binary ? (
-                      <span class="flag">0 / 1</span>
-                    ) : c.distinct.length ? (
-                      <span class="muted">{c.distinct.length} distinct</span>
-                    ) : (
-                      <span class="muted">continuous</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {d.columns.map((c) => {
+                const isTarget = c.index === s.target;
+                const kind = kindOf(c, s);
+                return (
+                  <tr class={`${isTarget ? "sel" : ""}${!isTarget && kind === "ignore" ? " off" : ""}`}>
+                    <td>
+                      <input
+                        type="radio"
+                        name="target"
+                        checked={isTarget}
+                        aria-label={`Use ${c.name} as target`}
+                        onChange={() => setTarget(c.index)}
+                      />
+                    </td>
+                    <td class="name">{c.name}</td>
+                    <td>
+                      {isTarget ? (
+                        <span class="flag warm">target</span>
+                      ) : (
+                        <select
+                          class="kind"
+                          aria-label={`How ${c.name} is read`}
+                          value={kind}
+                          onChange={(e) => setKind(c.index, (e.currentTarget as HTMLSelectElement).value as Kind)}
+                        >
+                          {c.allowed.map((k) => (
+                            <option value={k}>{KIND_TEXT[k]}</option>
+                          ))}
+                        </select>
+                      )}
+                    </td>
+                    <td class="num">{c.missing ? fmtInt(c.missing) : <span class="muted">none</span>}</td>
+                    <td class="num">{fmtInt(c.distinct)}</td>
+                    <td class="sum">
+                      {summary(c, d.rows - c.missing)}
+                      {c.reason && !isTarget && kind === "ignore" && <span class="muted"> · {c.reason}</span>}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -123,17 +159,43 @@ export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
               ))}
             </select>
           </label>
+          {spec?.kind === "binary" && target && (
+            <label class="field">
+              Counts as class 1
+              <select value={spec.one} onChange={(e) => setPositive((e.currentTarget as HTMLSelectElement).value)}>
+                {[spec.one, spec.zero].sort().map((v) => (
+                  <option value={v}>{v}</option>
+                ))}
+              </select>
+            </label>
+          )}
           {target?.constant && <p class="note warn">{target.name} never changes, there is nothing to learn from it.</p>}
-          {target && !target.constant && (
-            <p class="note">
-              {target.binary
-                ? "Values are 0 and 1, so this trains as binary classification: sigmoid output, cross-entropy loss, accuracy at 0.5."
-                : target.distinct.length > 2
-                  ? `${target.distinct.length} distinct values. The crate trains one output neuron, so this runs as regression; it can not learn ${target.distinct.length} classes with softmax.`
-                  : "Continuous values, so this trains as regression with a linear output."}
-            </p>
+          {enc?.error ? (
+            <p class="note warn">{enc.error}</p>
+          ) : (
+            spec && (
+              <p class="note">
+                {spec.kind === "binary"
+                  ? `Two classes: ${target?.name} = ${spec.one} against ${spec.zero}. Sigmoid output, cross-entropy loss, accuracy at 0.5.`
+                  : "Numbers, so this trains as regression with a linear output."}
+              </p>
+            )
           )}
         </section>
+        {enc && !enc.error && (
+          <section>
+            <div class="lab">Network inputs</div>
+            <p class="net">
+              {enc.inputs.length} columns → {enc.names.length} inputs
+            </p>
+            {wide.length > 0 && (
+              <p class="note">
+                Categories become one 0/1 input per value (top 30 per column, the rest share one), missing values get their own.{" "}
+                {wide.map((i) => `${i.name} ${i.width}`).join(", ")}.
+              </p>
+            )}
+          </section>
+        )}
         <section>
           <div class="lab">Preparation</div>
           <label class="check">
@@ -142,7 +204,7 @@ export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
               checked={s.draft.normalize}
               onChange={(e) => setDraft({ normalize: (e.currentTarget as HTMLInputElement).checked })}
             />
-            Normalize features to mean 0, std 1
+            Normalize inputs to mean 0, std 1
           </label>
           <label class="check">
             <input
@@ -155,14 +217,9 @@ export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
           <p class="note">
             Without it the last {Math.round(s.draft.validation_split * 100)}% of rows in file order become validation, as in the CLI.
           </p>
-          {constant.length > 0 && s.draft.normalize && (
-            <p class="note warn">
-              {constant.map((c) => c.name).join(", ")} {constant.length > 1 ? "are" : "is"} constant. The crate would divide by zero there; the console leaves {constant.length > 1 ? "them" : "it"} unscaled.
-            </p>
-          )}
         </section>
         <div class="actions">
-          <button class="primary" disabled={s.target === null} onClick={() => go("network")}>
+          <button class="primary" disabled={s.target === null || !enc || !!enc.error} onClick={() => go("network")}>
             Shape the network
           </button>
         </div>
@@ -220,7 +277,7 @@ function Empty({ busy }: { busy: boolean }) {
             <circle cx="178" cy="84" r="4" class="o" />
           </svg>
           <p class="drop-lead">Drop a CSV here</p>
-          <p class="note">Numbers only, one row per sample, an optional header row. Pick the target column after loading. The file stays on this machine.</p>
+          <p class="note">Numbers, categories, yes/no columns and ISO dates, one row per sample, an optional header row. Pick the target and how each column is read after loading. The file stays on this machine.</p>
           <div class="row">
             <FilePick label="Choose a file" primary />
             <button disabled={busy} onClick={() => void loadExample()}>

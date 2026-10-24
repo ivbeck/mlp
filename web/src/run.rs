@@ -1,6 +1,7 @@
 //! One training run: the model lives on its own thread, the ui steers it with
 //! commands and listens to a broadcast of epoch events
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,9 @@ use multilayer_perceptron::{
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
+
+use crate::dataset::Kind;
+use crate::encode::{Cell, Encoder, InputInfo, TargetSpec};
 
 /// Cells per side of the prediction field
 const FIELD_RES: usize = 48;
@@ -51,9 +55,15 @@ pub struct RunConfig {
     /// Shuffle the rows once before the tail split, the CLI never does this
     #[serde(default)]
     pub shuffle_before_split: bool,
-    /// Feature indices (into the feature vector, target removed) for the field plane
+    /// Positions in the run's input columns (numeric ones) for the field plane
     #[serde(default)]
     pub plane: Option<(usize, usize)>,
+    /// Column kinds chosen in the ui, by column index; missing ones keep the detected kind
+    #[serde(default)]
+    pub kinds: HashMap<usize, Kind>,
+    /// Which of a two-valued target's values counts as 1
+    #[serde(default)]
+    pub target_positive: Option<String>,
     /// Epochs per second cap, 0 = as fast as the machine goes. Changes wall clock only.
     #[serde(default)]
     pub pace: f64,
@@ -170,9 +180,9 @@ pub struct RunSummary {
     pub state: RunState,
     pub reason: Option<String>,
     pub notes: Vec<Note>,
-    /// Raw min/max and mean per feature, for probe defaults and axis ranges
-    pub feature_ranges: Vec<(f64, f64)>,
-    pub feature_means: Vec<f64>,
+    /// Source columns feeding the network, in encoding order
+    pub inputs: Vec<InputInfo>,
+    pub target: TargetSpec,
     pub started_at_ms: u128,
 }
 
@@ -200,9 +210,9 @@ impl RunHandle {
     ///
     /// Indices out of range or equal
     pub fn set_plane(&self, x: usize, y: usize) -> Result<Snapshot> {
-        let n = self.plane.ranges.len();
-        if x >= n || y >= n || x == y {
-            anyhow::bail!("Plane needs two different features below {n}");
+        let numeric = |i: usize| self.plane.ranges.get(i).copied().flatten().is_some();
+        if x == y || !numeric(x) || !numeric(y) {
+            anyhow::bail!("The chart needs two different number columns");
         }
         *lock(&self.plane.plane) = Some((x, y));
         let mut m = lock(&self.model);
@@ -218,13 +228,15 @@ impl RunHandle {
 #[derive(Debug)]
 pub struct Model {
     pub mlp: MultilayerPerceptron,
+    pub encoder: Arc<Encoder>,
     pub mean: Option<Array1<f64>>,
     pub std: Option<Array1<f64>>,
 }
 
 impl Model {
-    pub fn to_net_input(&self, raw: &[f64]) -> Array1<f64> {
-        let x = Array1::from_vec(raw.to_vec());
+    /// One raw value per input column, encoded and scaled like the training rows
+    pub fn to_net_input(&self, cells: &[Cell]) -> Array1<f64> {
+        let x = Array1::from_vec(self.encoder.encode(cells));
         match (&self.mean, &self.std) {
             (Some(m), Some(s)) => (&x - m) / s,
             _ => x,
@@ -287,10 +299,6 @@ struct Prepared {
     val: Option<Dataset>,
     model: Model,
     summary: RunSummary,
-    /// Raw feature min/max per column for the field plane
-    ranges: Vec<(f64, f64)>,
-    /// Raw feature means, the value off-plane features are held at
-    means: Vec<f64>,
 }
 
 #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
@@ -310,23 +318,43 @@ fn prepare(
         anyhow::bail!("Validation split must be in [0, 1)");
     }
     let mut notes = Vec::new();
-    let mut dataset =
-        Dataset::from_csv_reader(stored.bytes.as_slice(), config.target, info.has_header)?;
-    let features: Vec<String> = info
-        .columns
-        .iter()
-        .filter(|c| c.index != config.target)
-        .map(|c| c.name.clone())
-        .collect();
     let target_col = &info.columns[config.target];
-
-    let raw_cols: Vec<&crate::dataset::ColumnInfo> = info
-        .columns
+    let encoder = Encoder::build(
+        info,
+        &stored.rows,
+        config.target,
+        &config.kinds,
+        config.target_positive.as_deref(),
+    )?;
+    let (mut dataset, dropped) = encoder.dataset(&stored.rows)?;
+    let features = encoder.names.clone();
+    let binary = matches!(encoder.target, TargetSpec::Binary { .. });
+    if dropped > 0 {
+        notes.push(Note::info(format!(
+            "{dropped} rows have no {} and were left out.",
+            target_col.name
+        )));
+    }
+    let wide: Vec<String> = encoder
+        .inputs
         .iter()
-        .filter(|c| c.index != config.target)
+        .filter(|i| i.width > 1)
+        .map(|i| format!("{} → {}", i.name, i.width))
         .collect();
-    let ranges = raw_cols.iter().map(|c| (c.min, c.max)).collect();
-    let means = raw_cols.iter().map(|c| c.mean).collect();
+    if !wide.is_empty() {
+        notes.push(Note::info(format!(
+            "{} columns became {} network inputs ({}).",
+            encoder.inputs.len(),
+            features.len(),
+            wide.join(", ")
+        )));
+    }
+    if let TargetSpec::Binary { one, zero } = &encoder.target {
+        notes.push(Note::info(format!(
+            "{} = {one} is class 1, {zero} is class 0.",
+            target_col.name
+        )));
+    }
 
     if target_col.constant {
         notes.push(Note::warn(format!(
@@ -374,7 +402,7 @@ fn prepare(
         anyhow::bail!("Validation split leaves no rows to train on");
     }
     if let Some(v) = &val {
-        if target_col.binary {
+        if binary {
             let ones = v.labels.iter().filter(|&&l| l >= 0.5).count();
             if ones == 0 || ones == v.num_samples() {
                 notes.push(Note::warn(if config.shuffle_before_split {
@@ -410,14 +438,14 @@ fn prepare(
         dataset_name: info.name.clone(),
         features,
         target_name: target_col.name.clone(),
-        binary_target: target_col.binary,
+        binary_target: binary,
         train_rows: train.num_samples(),
         val_rows: val.as_ref().map_or(0, Dataset::num_samples),
         state: RunState::Running,
         reason: None,
         notes,
-        feature_ranges: raw_cols.iter().map(|c| (c.min, c.max)).collect(),
-        feature_means: raw_cols.iter().map(|c| c.mean).collect(),
+        inputs: encoder.inputs.clone(),
+        target: encoder.target.clone(),
         started_at_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_millis()),
@@ -426,10 +454,13 @@ fn prepare(
     Ok(Prepared {
         train,
         val,
-        model: Model { mlp, mean, std },
+        model: Model {
+            mlp,
+            encoder: Arc::new(encoder),
+            mean,
+            std,
+        },
         summary,
-        ranges,
-        means,
     })
 }
 
@@ -450,28 +481,28 @@ fn snapshot(model: &mut Model, epoch: usize, p: &FieldPlane) -> Snapshot {
         (None, None)
     };
     let plane = *lock(&p.plane);
-    let field = plane.map(|(x, y)| {
-        let (x0, x1) = pad(p.ranges[x]);
-        let (y0, y1) = pad(p.ranges[y]);
-        let mut raw = p.means.clone();
+    let field = plane.and_then(|(x, y)| {
+        let (x0, x1) = pad(p.ranges.get(x).copied().flatten()?);
+        let (y0, y1) = pad(p.ranges.get(y).copied().flatten()?);
+        let mut raw = p.defaults.clone();
         let mut values = Vec::with_capacity(FIELD_RES * FIELD_RES);
         let step = (FIELD_RES - 1) as f64;
         for j in 0..FIELD_RES {
-            raw[y] = (y1 - y0).mul_add(j as f64 / step, y0);
+            raw[y] = Cell::Num((y1 - y0).mul_add(j as f64 / step, y0));
             for i in 0..FIELD_RES {
-                raw[x] = (x1 - x0).mul_add(i as f64 / step, x0);
+                raw[x] = Cell::Num((x1 - x0).mul_add(i as f64 / step, x0));
                 let input = model.to_net_input(&raw);
                 values.push(model.mlp.predict(&input)[0]);
             }
         }
-        Field {
+        Some(Field {
             x,
             y,
             x_range: (x0, x1),
             y_range: (y0, y1),
             res: FIELD_RES,
             values,
-        }
+        })
     });
     Snapshot {
         epoch,
@@ -489,8 +520,10 @@ fn pad((lo, hi): (f64, f64)) -> (f64, f64) {
 #[derive(Debug)]
 pub struct FieldPlane {
     plane: Mutex<Option<(usize, usize)>>,
-    ranges: Vec<(f64, f64)>,
-    means: Vec<f64>,
+    /// Raw min/max per input column, None for the ones that are not numbers
+    ranges: Vec<Option<(f64, f64)>>,
+    /// Where every input sits when it is not on the chart: mean or most common value
+    defaults: Vec<Cell>,
 }
 
 /// Validate the config, build the model and start the thread
@@ -504,17 +537,25 @@ pub fn start(
     stored: &crate::dataset::StoredDataset,
 ) -> Result<RunHandle> {
     let p = prepare(id, config, stored)?;
-    let nfeat = p.train.num_features();
+    let inputs = &p.summary.inputs;
+    let ranges: Vec<Option<(f64, f64)>> = inputs
+        .iter()
+        .map(|i| match (i.kind, i.min, i.max) {
+            (Kind::Numeric, Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => None,
+        })
+        .collect();
+    let numeric: Vec<usize> = (0..ranges.len()).filter(|&i| ranges[i].is_some()).collect();
     let plane = p
         .summary
         .config
         .plane
-        .filter(|(x, y)| *x < nfeat && *y < nfeat && x != y)
-        .or_else(|| (nfeat >= 2).then_some((0, 1)));
+        .filter(|(x, y)| x != y && numeric.contains(x) && numeric.contains(y))
+        .or_else(|| (numeric.len() >= 2).then(|| (numeric[0], numeric[1])));
     let field_plane = Arc::new(FieldPlane {
         plane: Mutex::new(plane),
-        ranges: p.ranges,
-        means: p.means,
+        ranges,
+        defaults: inputs.iter().map(|i| i.default.clone()).collect(),
     });
     let (events, _) = broadcast::channel(4096);
     let (commands, rx) = mpsc::unbounded_channel();

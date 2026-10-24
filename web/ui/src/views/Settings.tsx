@@ -99,7 +99,11 @@ export function DraftSettings({ s, compact, disabled }: { s: State; compact?: bo
           </>
         )}
       </fieldset>
-      {!compact && <p class="note">Speed only spaces the epochs out so you can watch; the numbers are the same at any speed.</p>}
+      {!compact && (
+        <p class="note">
+          The crate updates the weights after every row, batch size only groups the loss it reports. Speed only spaces the epochs out so you can watch; the numbers are the same at any speed.
+        </p>
+      )}
     </section>
   );
 }

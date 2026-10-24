@@ -3,7 +3,10 @@ import {
   api,
   openStream,
   type Activation,
+  type ColumnInfo,
   type DatasetInfo,
+  type Encoding,
+  type Kind,
   type EpochRecord,
   type LayerSpec,
   type LossName,
@@ -49,7 +52,13 @@ export interface State {
   dataset: DatasetInfo | null;
   file: File | null;
   target: number | null;
-  /** Feature indices (target removed) drawn on the chart */
+  /** Column kinds set by hand, by column index */
+  kinds: Record<number, Kind>;
+  /** Which value of a two-valued target counts as 1, null = the server's pick */
+  positive: string | null;
+  /** What the network inputs would be with the current choices, from the server */
+  encoding: Encoding | null;
+  /** Column indices of the two numbers drawn on the chart */
   plane: [number, number];
   draft: Draft;
   runs: RunView[];
@@ -57,7 +66,7 @@ export interface State {
   /** Epoch shown on the chart while scrubbing, null follows live */
   scrub: number | null;
   stream: StreamStatus | "idle";
-  probe: { inputs: number[]; result: Prediction | null; row: number | null } | null;
+  probe: { inputs: (number | string)[]; result: Prediction | null; row: number | null } | null;
   busy: string | null;
   error: string | null;
 }
@@ -90,6 +99,9 @@ let state: State = {
   dataset: null,
   file: null,
   target: null,
+  kinds: {},
+  positive: null,
+  encoding: null,
   plane: [0, 1],
   draft: defaultDraft,
   runs: [],
@@ -142,41 +154,120 @@ export function isLive(r: RunView | null): boolean {
   return !!r && (r.summary.state === "running" || r.summary.state === "paused");
 }
 
-/** Features (all columns but the target) of the loaded file */
+export function kindOf(c: ColumnInfo, s: State = state): Kind {
+  const k = s.kinds[c.index];
+  return k && c.allowed.includes(k) ? k : c.kind;
+}
+
+/** Columns that feed the network: everything but the target and ignored ones */
 export function featureColumns(s: State = state) {
-  return s.dataset ? s.dataset.columns.filter((c) => c.index !== s.target) : [];
+  return s.dataset ? s.dataset.columns.filter((c) => c.index !== s.target && kindOf(c, s) !== "ignore") : [];
+}
+
+/** Feature columns used as numbers, the only ones the chart can put on an axis */
+export function numericColumns(s: State = state) {
+  return featureColumns(s).filter((c) => kindOf(c, s) === "numeric");
 }
 
 function fail(e: unknown) {
   set({ error: e instanceof Error ? e.message : String(e), busy: null });
 }
 
+function isClassTarget(c: ColumnInfo | undefined): boolean {
+  return !!c && (c.binary || (c.distinct === 2 && c.min === null));
+}
+
 function sensibleDraft(d: DatasetInfo, target: number): Partial<Draft> {
-  const col = d.columns[target];
-  if (!col) return {};
-  return col.binary
-    ? { output_activation: "sigmoid", loss: "bce" }
-    : { output_activation: "linear", loss: "mse" };
+  const head = isClassTarget(d.columns[target])
+    ? { output_activation: "sigmoid" as const, loss: "bce" as const }
+    : { output_activation: "linear" as const, loss: "mse" as const };
+  // The crate steps the optimizer after every row, so a big file needs a small rate
+  // and a wide one a wider net; small files keep the playground defaults
+  const big = d.rows > 2000;
+  return {
+    ...head,
+    learning_rate: big ? 0.001 : 0.01,
+    patience: big ? 6 : 20,
+    hidden: big
+      ? [
+          { size: 32, activation: "relu" },
+          { size: 16, activation: "relu" },
+        ]
+      : [
+          { size: 8, activation: "tanh" },
+          { size: 8, activation: "tanh" },
+        ],
+  };
 }
 
 function pickTarget(d: DatasetInfo): number {
-  // Last 0/1 column, else the last column, matches how most files are laid out
+  // Last two-valued column, else the last number column, matches how most files are laid out
   const usable = d.columns.filter((c) => !c.constant);
-  const binary = [...usable].reverse().find((c) => c.binary);
-  return (binary ?? usable[usable.length - 1] ?? d.columns[d.columns.length - 1]!).index;
+  const binary = [...usable].reverse().find(isClassTarget);
+  const numeric = [...usable].reverse().find((c) => c.min !== null);
+  return (binary ?? numeric ?? d.columns[d.columns.length - 1]!).index;
+}
+
+function defaultPlane(s: State): [number, number] {
+  // columns with a value in nearly every row (weights, ids) make poor axes, they go last
+  const rows = s.dataset?.rows ?? 1;
+  const nums = numericColumns(s)
+    .map((c, i) => ({ c, i, spread: c.distinct / rows > 0.5 ? 1 : 0 }))
+    .sort((a, b) => a.spread - b.spread || a.i - b.i)
+    .map(({ c }) => c.index);
+  return [nums[0] ?? 0, nums[1] ?? nums[0] ?? 0];
+}
+
+let encTimer = 0;
+let encSeq = 0;
+/** Ask the server what the current column choices encode to, a moment after the last change */
+function refreshEncoding() {
+  window.clearTimeout(encTimer);
+  encTimer = window.setTimeout(async () => {
+    const s = state;
+    if (!s.dataset || s.target === null) return;
+    const seq = ++encSeq;
+    try {
+      const encoding = await api.encoding(s.dataset.id, { target: s.target, kinds: s.kinds, target_positive: s.positive });
+      if (seq === encSeq) set({ encoding });
+    } catch (e) {
+      fail(e);
+    }
+  }, 120);
 }
 
 function adopt(d: DatasetInfo, file: File | null) {
   const target = pickTarget(d);
-  set((s) => ({
-    dataset: d,
-    file,
-    target,
-    plane: [0, Math.min(1, d.columns.length - 2)] as [number, number],
-    draft: { ...s.draft, ...sensibleDraft(d, target) },
-    busy: null,
-    error: null,
-  }));
+  set((s) => {
+    const next = { ...s, dataset: d, target, kinds: {}, positive: null, encoding: null };
+    return {
+      dataset: d,
+      file,
+      target,
+      kinds: {},
+      positive: null,
+      encoding: null,
+      plane: defaultPlane(next),
+      draft: { ...s.draft, ...sensibleDraft(d, target) },
+      busy: null,
+      error: null,
+    };
+  });
+  refreshEncoding();
+}
+
+export function setKind(index: number, kind: Kind) {
+  set((s) => {
+    const kinds = { ...s.kinds, [index]: kind };
+    const plane = numericColumns({ ...s, kinds }).some((c) => c.index === s.plane[0]) ? s.plane : defaultPlane({ ...s, kinds });
+    return { kinds, plane };
+  });
+  refreshEncoding();
+}
+
+export function setPositive(positive: string) {
+  set({ positive });
+  refreshEncoding();
 }
 
 export async function loadFile(file: File) {
@@ -213,9 +304,14 @@ export function setTarget(target: number) {
   if (!s.dataset) return;
   set({
     target,
-    plane: [0, Math.min(1, s.dataset.columns.length - 2)],
-    draft: { ...s.draft, ...sensibleDraft(s.dataset, target) },
+    positive: null,
+    plane: defaultPlane({ ...s, target }),
+    // a new target only changes the output head, layers the user set stay
+    draft: (({ output_activation, loss }) => ({ ...s.draft, output_activation: output_activation ?? s.draft.output_activation, loss: loss ?? s.draft.loss }))(
+      sensibleDraft(s.dataset, target),
+    ),
   });
+  refreshEncoding();
 }
 
 let closeStream: (() => void) | null = null;
@@ -296,7 +392,9 @@ export function configFromDraft(s: State = state): RunConfig | null {
     shuffle: d.shuffle,
     early_stopping_patience: d.early_stopping ? d.patience : null,
     shuffle_before_split: d.shuffle_before_split,
-    plane: s.plane,
+    plane: planePositions(s.encoding?.inputs ?? [], s.plane),
+    kinds: s.kinds,
+    target_positive: s.positive,
     pace: d.pace,
     label: "",
   };
@@ -337,12 +435,21 @@ export async function control(cmd: "pause" | "resume" | "step" | "stop") {
   }
 }
 
+/** Column indices to positions in a run's input list, null when either is not an input */
+export function planePositions(inputs: { index: number }[], plane: [number, number]): [number, number] | null {
+  const x = inputs.findIndex((i) => i.index === plane[0]);
+  const y = inputs.findIndex((i) => i.index === plane[1]);
+  return x >= 0 && y >= 0 && x !== y ? [x, y] : null;
+}
+
 export async function setPlane(plane: [number, number]) {
   set({ plane });
   const r = activeRun();
   if (!r) return;
+  const pos = planePositions(r.summary.inputs, plane);
+  if (!pos) return;
   try {
-    const snap = await api.plane(r.summary.id, plane[0], plane[1]);
+    const snap = await api.plane(r.summary.id, pos[0], pos[1]);
     // Older frames show another plane, they no longer replay
     patchRun(r.summary.id, (v) => ({ ...v, latest: snap, frames: snap.field ? [snap] : [] }));
     set({ scrub: null });
@@ -352,7 +459,7 @@ export async function setPlane(plane: [number, number]) {
 }
 
 let probeSeq = 0;
-export async function probe(inputs: number[], row: number | null = null) {
+export async function probe(inputs: (number | string)[], row: number | null = null) {
   const r = activeRun();
   if (!r) return;
   const seq = ++probeSeq;
@@ -376,9 +483,14 @@ export async function restore() {
       runs: runs.map((r) => ({ summary: r.summary, history: r.history, frames: [], latest: null })),
       dataset: s.dataset ?? dataset,
       target: s.dataset ? s.target : last.config.target,
-      plane: last.config.plane ?? s.plane,
+      kinds: s.dataset ? s.kinds : Object.fromEntries(Object.entries(last.config.kinds).map(([k, v]) => [+k, v])),
+      positive: s.dataset ? s.positive : last.config.target_positive,
+      plane: last.config.plane
+        ? ([last.inputs[last.config.plane[0]]?.index ?? 0, last.inputs[last.config.plane[1]]?.index ?? 0] as [number, number])
+        : s.plane,
     }));
     selectRun(last.id);
+    refreshEncoding();
   } catch {
     // a fresh server simply has nothing to restore
   }

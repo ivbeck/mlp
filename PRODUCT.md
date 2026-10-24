@@ -37,8 +37,9 @@ is what the crate computed.
 
 - Desktop browser on the same machine as the server (localhost). Long-ish sessions while
   runs train; the screen is watched, not glanced at.
-- Data arrives as CSV files of numeric values, optional header, one target column
-  (0-based index in the CLI). `example_data.csv` (20 rows, 2 features, binary target) is the
+- Data arrives as CSV files, optional header, one target column. The CLI takes numbers
+  only; the console also reads text categories, yes/no columns and ISO dates and encodes
+  them itself (one-hot, top 30 values per column, missing as its own value or mean fill). `example_data.csv` (20 rows, 2 features, binary target) is the
   bundled sample.
 - CLI parity: every CLI option (`--architecture`, `--hidden-activation`,
   `--output-activation`, `--loss`, `--optimizer`, `--learning-rate`, `--epochs`,

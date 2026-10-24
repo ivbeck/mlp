@@ -272,8 +272,12 @@ table.cols th { font: 500 11.5px var(--fc); text-transform: uppercase; letter-sp
 table.cols td { padding: 6px 10px; border-bottom: var(--hair); }
 table.cols .num { text-align: right; }
 table.cols .name { font-weight: 500; }
-table.cols tbody tr { cursor: pointer; }
+table.cols tr.off td:not(:nth-child(3)) { color: var(--ink-2); }
+table.cols tr.off .name { font-weight: 400; text-decoration: line-through; text-decoration-color: var(--grid); }
+table.cols select.kind { height: 28px; font-size: 13px; padding: 0 4px; }
+table.cols td.sum { color: var(--ink-2); font-size: 13px; max-width: 48ch; }
 table.cols tbody tr:hover { background: rgba(29, 39, 51, .04); }
+.inputs select { height: 34px; }
 table.cols tr.sel { background: var(--white); outline: 1px solid var(--ink); outline-offset: -1px; }
 table.cols tr.sel .name { font-weight: 600; }
 .flag { font: 500 11px var(--fc); text-transform: uppercase; letter-spacing: .07em; border: 1px solid var(--grid); padding: 1px 6px; border-radius: 2px; }

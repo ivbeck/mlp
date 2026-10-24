@@ -19,6 +19,12 @@ export function fmtP(v: number | null | undefined): string {
   return v.toFixed(3);
 }
 
+/** Four significant digits, for column summaries: 17, 0.5, 12,285, 1,484,705 */
+export function fmtShort(v: number | null | undefined): string {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "–";
+  return Number(v.toPrecision(4)).toLocaleString("en-US", { maximumFractionDigits: 4 }).replace("-", "−");
+}
+
 export function fmtInt(v: number): string {
   return v.toLocaleString("en-US");
 }

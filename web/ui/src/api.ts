@@ -1,14 +1,21 @@
 // Wire types mirror web/src/{dataset,run}.rs, keep them in step
 
+export type Kind = "numeric" | "binary" | "category" | "date" | "ignore";
+
 export interface ColumnInfo {
   index: number;
   name: string;
-  min: number;
-  max: number;
-  mean: number;
-  std: number;
+  kind: Kind;
+  allowed: Kind[];
+  reason: string | null;
+  missing: number;
+  distinct: number;
+  min: number | null;
+  max: number | null;
+  mean: number | null;
+  std: number | null;
   constant: boolean;
-  distinct: number[];
+  categories: [string, number][];
   binary: boolean;
 }
 
@@ -18,9 +25,30 @@ export interface DatasetInfo {
   has_header: boolean;
   rows: number;
   columns: ColumnInfo[];
-  sample: number[][];
+  /** First rows as text cells */
+  sample: string[][];
   size_bytes: number;
   is_sample: boolean;
+}
+
+export interface InputInfo {
+  index: number;
+  name: string;
+  kind: Kind;
+  options: string[];
+  min: number | null;
+  max: number | null;
+  default: number | string;
+  width: number;
+}
+
+export type TargetSpec = { kind: "binary"; one: string; zero: string } | { kind: "numeric" };
+
+export interface Encoding {
+  names: string[];
+  inputs: InputInfo[];
+  target: TargetSpec | null;
+  error: string | null;
 }
 
 export interface LayerSpec {
@@ -49,6 +77,8 @@ export interface RunConfig {
   early_stopping_patience: number | null;
   shuffle_before_split: boolean;
   plane: [number, number] | null;
+  kinds: Record<number, Kind>;
+  target_positive: string | null;
   pace: number;
   label: string;
 }
@@ -96,13 +126,14 @@ export interface RunSummary {
   state: RunState;
   reason: string | null;
   notes: { level: "info" | "warn"; text: string }[];
-  feature_ranges: [number, number][];
-  feature_means: number[];
+  inputs: InputInfo[];
+  target: TargetSpec;
   started_at_ms: number;
 }
 
 export interface Prediction {
   input: number[];
+  names: string[];
   layers: number[][];
   output: number | null;
 }
@@ -145,13 +176,15 @@ export const api = {
     const q = new URLSearchParams({ name, has_header: String(hasHeader) });
     return call(`/api/datasets?${q}`, { method: "POST", body: file });
   },
+  encoding: (id: string, body: { target: number; kinds: Record<number, Kind>; target_positive: string | null }): Promise<Encoding> =>
+    call(`/api/datasets/${id}/encoding`, json(body)),
   dataset: (id: string): Promise<DatasetInfo> => call(`/api/datasets/${id}`),
   example: (): Promise<DatasetInfo> => call("/api/datasets/example", { method: "POST" }),
   start: (config: RunConfig): Promise<RunSummary> => call("/api/runs", json(config)),
   runs: (): Promise<{ summary: RunSummary; history: EpochRecord[] }[]> => call("/api/runs"),
   control: (id: string, cmd: "pause" | "resume" | "step" | "stop"): Promise<void> =>
     call(`/api/runs/${id}/control`, json({ cmd })),
-  predict: (id: string, inputs: number[]): Promise<Prediction> =>
+  predict: (id: string, inputs: (number | string)[]): Promise<Prediction> =>
     call(`/api/runs/${id}/predict`, json({ inputs })),
   plane: (id: string, x: number, y: number): Promise<Snapshot> =>
     call(`/api/runs/${id}/plane`, json({ x, y })),

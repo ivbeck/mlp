@@ -59,8 +59,12 @@ just console --bind 0.0.0.0:7878  # other machines too, there is no login
 By hand: `cd web/ui && npm ci && npm run build`, then `cargo run --release -p mlp-console`.
 For frontend work run the server and `npm run dev` in `web/ui` (vite proxies `/api`).
 
-- **Data:** column stats, constant columns flagged, target picked, optional shuffle before
-  the validation split (the CLI splits off the last rows in file order).
+- **Data:** mixed columns are fine: numbers, text categories (one-hot, top 30 values plus
+  "other", missing as its own value), yes/no columns and ISO dates (year plus month,
+  weekday and hour as points on a circle). Each column's detected type can be changed or
+  ignored; ids, constant columns and text columns that copy a number column one to one
+  are ignored by default. Two-valued targets pick which value counts as 1. Optional
+  shuffle before the validation split (the CLI splits off the last rows in file order).
 - **Network:** hidden layers, activations, output activation, loss, optimizer and every
   other CLI option. The library trains a single output neuron, so multi-class targets run
   as regression.

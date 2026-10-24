@@ -2,6 +2,7 @@
 //! every epoch to the browser
 
 mod dataset;
+mod encode;
 mod run;
 
 use std::collections::HashMap;
@@ -90,7 +91,7 @@ async fn upload(
     let id = app.id("d");
     let name = q.name.unwrap_or_else(|| "upload.csv".into());
     let stored = tokio::task::spawn_blocking(move || {
-        dataset::parse(id, name, body.to_vec(), q.has_header, false)
+        dataset::parse(id, name, &body, q.has_header, false)
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
@@ -105,7 +106,7 @@ async fn example(State(app): State<Shared>) -> Result<impl IntoResponse, ApiErro
     let stored = dataset::parse(
         id,
         "example_data.csv".into(),
-        EXAMPLE_CSV.as_bytes().to_vec(),
+        EXAMPLE_CSV.as_bytes(),
         Some(true),
         true,
     )?;
@@ -122,6 +123,42 @@ async fn get_dataset(
         .get(&id)
         .map(|d| Json(d.info.clone()))
         .ok_or_else(|| not_found("Dataset"))
+}
+
+#[derive(Debug, Deserialize)]
+struct EncodingBody {
+    target: usize,
+    #[serde(default)]
+    kinds: HashMap<usize, dataset::Kind>,
+    #[serde(default)]
+    target_positive: Option<String>,
+}
+
+/// What a run with these column choices would feed the network, without training
+async fn encoding(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<EncodingBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let stored = lock(&app.datasets)
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| not_found("Dataset"))?;
+    let out = tokio::task::spawn_blocking(move || {
+        match encode::Encoder::build(
+            &stored.info,
+            &stored.rows,
+            body.target,
+            &body.kinds,
+            body.target_positive.as_deref(),
+        ) {
+            Ok(e) => json!({ "names": e.names, "inputs": e.inputs, "target": e.target, "error": null }),
+            Err(err) => json!({ "names": [], "inputs": [], "target": null, "error": format!("{err:#}") }),
+        }
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(out))
 }
 
 async fn start_run(
@@ -199,8 +236,8 @@ async fn set_plane(
 
 #[derive(Debug, Deserialize)]
 struct PredictBody {
-    /// Raw feature values in file units, target column left out
-    inputs: Vec<f64>,
+    /// One raw value per input column of the run (a number or a category), file units
+    inputs: Vec<encode::Cell>,
 }
 
 async fn predict(
@@ -215,7 +252,7 @@ async fn predict(
     };
     let out = tokio::task::spawn_blocking(move || {
         let mut m = lock(&model);
-        let want = m.mlp.layers().first().map_or(0, multilayer_perceptron::layer::Layer::input_size);
+        let want = m.encoder.inputs.len();
         if body.inputs.len() != want {
             return Err(ApiError(
                 StatusCode::BAD_REQUEST,
@@ -230,7 +267,7 @@ async fn predict(
             .map(|a| a.to_vec())
             .collect();
         let output = layers.last().and_then(|l| l.first()).copied();
-        Ok(json!({ "input": input.to_vec(), "layers": layers, "output": output }))
+        Ok(json!({ "input": input.to_vec(), "names": m.encoder.names, "layers": layers, "output": output }))
     })
     .await
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
@@ -362,6 +399,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/datasets", post(upload))
         .route("/api/datasets/example", post(example))
         .route("/api/datasets/{id}", get(get_dataset))
+        .route("/api/datasets/{id}/encoding", post(encoding))
         .route("/api/runs", get(list_runs).post(start_run))
         .route("/api/runs/{id}/control", post(control))
         .route("/api/runs/{id}/predict", post(predict))
