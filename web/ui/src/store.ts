@@ -208,14 +208,37 @@ function pickTarget(d: DatasetInfo): number {
   return (binary ?? numeric ?? d.columns[d.columns.length - 1]!).index;
 }
 
+/** Absolute Pearson correlation over the sample rows, cells that do not read as numbers skipped */
+function correlation(xs: number[], ys: number[]): number {
+  let n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i]!;
+    const y = ys[i]!;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    n++; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+  }
+  const vx = n * sxx - sx * sx;
+  const vy = n * syy - sy * sy;
+  return n > 2 && vx > 0 && vy > 0 ? Math.abs((n * sxy - sx * sy) / Math.sqrt(vx * vy)) : 0;
+}
+
+/** The two number columns that move most with the target go on the axes */
 function defaultPlane(s: State): [number, number] {
-  // columns with a value in nearly every row (weights, ids) make poor axes, they go last
-  const rows = s.dataset?.rows ?? 1;
-  const nums = numericColumns(s)
-    .map((c, i) => ({ c, i, spread: c.distinct / rows > 0.5 ? 1 : 0 }))
-    .sort((a, b) => a.spread - b.spread || a.i - b.i)
+  const d = s.dataset;
+  const nums = numericColumns(s);
+  const t = d && s.target !== null ? d.columns[s.target] : undefined;
+  if (!d || !t || nums.length < 2) return [nums[0]?.index ?? 0, nums[1]?.index ?? nums[0]?.index ?? 0];
+  const first = t.categories[0]?.[0];
+  const ys = d.sample.map((r) => (t.min !== null ? Number(r[t.index]) : r[t.index] === first ? 1 : 0));
+  const ranked = nums
+    .map((c) => {
+      // a column that is one value in most rows (capital gain: 0) makes a flat axis
+      const share = (c.categories[0]?.[1] ?? 0) / Math.max(1, d.rows - c.missing);
+      return { c, r: correlation(d.sample.map((row) => Number(row[c.index])), ys) * (share > 0.7 ? 0.25 : 1) };
+    })
+    .sort((a, b) => b.r - a.r)
     .map(({ c }) => c.index);
-  return [nums[0] ?? 0, nums[1] ?? nums[0] ?? 0];
+  return [ranked[0]!, ranked[1]!];
 }
 
 let encTimer = 0;
