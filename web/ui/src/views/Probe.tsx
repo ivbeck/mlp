@@ -2,7 +2,7 @@ import { useEffect } from "preact/hooks";
 import { Surface } from "../charts/Surface";
 import { activeRun, probe, setPlane, type State } from "../store";
 import { ACTIVATIONS, fmt, fmtP, label, useWidth } from "../util";
-import { ChartKey, KIND_TEXT, PlaneSelect, stationsFor, targetRange, targetValue } from "./shared";
+import { ChartKey, KIND_TEXT, PlaneSelect, axisInputs, fieldAxes, stationsFor, targetRange, targetValue } from "./shared";
 
 export function ProbeView({ s }: { s: State }) {
   const run = activeRun(s)!;
@@ -17,7 +17,9 @@ export function ProbeView({ s }: { s: State }) {
   const sameData = !!s.dataset && s.dataset.id === c.dataset_id;
   const vRange: [number, number] = sameData ? targetRange(s.dataset!, c.target, sum.target) : [0, 1];
   const rows = sameData ? s.dataset!.sample.slice(0, 200) : [];
-  const nums = sum.inputs.filter((i) => i.kind === "numeric");
+  const nums = axisInputs(sum.inputs);
+  const axes = field ? fieldAxes(field, sum.inputs) : null;
+  const stations = axes && sameData ? stationsFor(s.dataset!, axes[0], axes[1], c.target, sum.target) : [];
   const num = (v: number | string | undefined) => (typeof v === "number" ? v : Number(v));
   const out = result?.output ?? null;
 
@@ -50,15 +52,18 @@ export function ProbeView({ s }: { s: State }) {
         {field && (
           <Surface
             field={field}
-            stations={xc && yc && sameData ? stationsFor(s.dataset!, xc.index, yc.index, c.target, sum.target) : []}
+            stations={stations}
             binary={sum.binary_target}
-            xRange={field.x_range}
-            yRange={field.y_range}
+            xRange={field.x_range ?? [0, 1]}
+            yRange={field.y_range ?? [0, 1]}
             vRange={vRange}
             xName={xc?.name ?? "x"}
             yName={yc?.name ?? "y"}
             height={420}
-            probe={[num(inputs[field.x]), num(inputs[field.y])]}
+            probe={[
+              field.x_labels ? String(inputs[field.x] ?? "") : num(inputs[field.x]),
+              field.y_labels ? String(inputs[field.y] ?? "") : num(inputs[field.y]),
+            ]}
             onProbe={(x, y) => {
               const next = inputs.slice();
               next[field.x] = x;
@@ -161,8 +166,9 @@ export function ProbeView({ s }: { s: State }) {
         </section>
         {field && (
           <ChartKey
+            banded={!!(field.x_labels || field.y_labels)}
             spec={sum.target}
-            stations={xc && yc && sameData ? stationsFor(s.dataset!, xc.index, yc.index, c.target, sum.target) : []}
+            stations={stations}
             vRange={vRange}
             targetName={sum.target_name}
           />

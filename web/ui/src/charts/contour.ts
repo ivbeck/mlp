@@ -116,15 +116,15 @@ export function walk(line: Pt[], step: number, offset = step / 2): { p: Pt; t: P
   return out;
 }
 
-/** Bilinear sample of the grid at a fractional grid position */
-export function sample(values: ArrayLike<number>, res: number, gx: number, gy: number): number {
-  const x = Math.min(Math.max(gx, 0), res - 1);
-  const y = Math.min(Math.max(gy, 0), res - 1);
-  const i = Math.min(Math.floor(x), res - 2);
-  const j = Math.min(Math.floor(y), res - 2);
-  const fx = x - i;
-  const fy = y - j;
-  const v = (a: number, b: number) => values[b * res + a]!;
+/** Bilinear sample of an nx by ny grid at a fractional grid position */
+export function sample(values: ArrayLike<number>, nx: number, ny: number, gx: number, gy: number): number {
+  const x = Math.min(Math.max(gx, 0), nx - 1);
+  const y = Math.min(Math.max(gy, 0), ny - 1);
+  const i = Math.max(0, Math.min(Math.floor(x), nx - 2));
+  const j = Math.max(0, Math.min(Math.floor(y), ny - 2));
+  const fx = nx > 1 ? x - i : 0;
+  const fy = ny > 1 ? y - j : 0;
+  const v = (a: number, b: number) => values[Math.min(b, ny - 1) * nx + Math.min(a, nx - 1)]!;
   return (
     v(i, j) * (1 - fx) * (1 - fy) +
     v(i + 1, j) * fx * (1 - fy) +

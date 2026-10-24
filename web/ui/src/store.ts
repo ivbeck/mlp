@@ -282,7 +282,10 @@ function adopt(d: DatasetInfo, file: File | null) {
 export function setKind(index: number, kind: Kind) {
   set((s) => {
     const kinds = { ...s.kinds, [index]: kind };
-    const plane = numericColumns({ ...s, kinds }).some((c) => c.index === s.plane[0]) ? s.plane : defaultPlane({ ...s, kinds });
+    // the axes stay unless one of them stopped being a number or category column
+    const next = { ...s, kinds };
+    const ok = (i: number) => featureColumns(next).some((c) => c.index === i && ["numeric", "category", "binary"].includes(kindOf(c, next)));
+    const plane = ok(s.plane[0]) && ok(s.plane[1]) ? s.plane : defaultPlane(next);
     return { kinds, plane };
   });
   refreshEncoding();

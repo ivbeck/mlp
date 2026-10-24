@@ -1,4 +1,5 @@
-import type { DatasetInfo, Kind, RunSummary, TargetSpec } from "../api";
+import type { ColumnInfo, DatasetInfo, Kind, RunSummary, TargetSpec } from "../api";
+import { bandOf } from "../charts/Bands";
 import type { Station } from "../charts/Surface";
 import { ACTIVATIONS, label } from "../util";
 
@@ -15,15 +16,48 @@ export function targetValue(cell: string | undefined, spec: TargetSpec | null): 
   return Number(cell);
 }
 
-/** Sample rows as chart stations, rows with a missing cell left out */
-export function stationsFor(d: DatasetInfo, xCol: number, yCol: number, target: number, spec: TargetSpec | null): Station[] {
+/** One chart axis: a column, and the bands when it is read as categories */
+export interface AxisPick {
+  col: number;
+  labels: string[] | null;
+}
+
+/** Sample rows as chart stations, rows with a missing cell (or no band) left out */
+export function stationsFor(d: DatasetInfo, xa: AxisPick, ya: AxisPick, target: number, spec: TargetSpec | null): Station[] {
+  const coord = (a: AxisPick, cell: string | undefined) =>
+    a.labels ? bandOf(cell, a.labels) : isMissing(cell) ? NaN : Number(cell);
   const out: Station[] = [];
   for (const row of d.sample) {
-    const x = isMissing(row[xCol]) ? NaN : Number(row[xCol]);
-    const y = isMissing(row[yCol]) ? NaN : Number(row[yCol]);
+    const x = coord(xa, row[xa.col]);
+    const y = coord(ya, row[ya.col]);
     const v = targetValue(row[target], spec);
-    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(v)) out.push({ x, y, v });
+    const inBand = (!xa.labels || x >= 0) && (!ya.labels || y >= 0);
+    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(v) && inBand) out.push({ x, y, v });
   }
+  return out;
+}
+
+/** The two axes of a run's field as columns, with their bands */
+export function fieldAxes(field: { x: number; y: number; x_labels: string[] | null; y_labels: string[] | null }, inputs: { index: number }[]): [AxisPick, AxisPick] | null {
+  const x = inputs[field.x];
+  const y = inputs[field.y];
+  return x && y ? [{ col: x.index, labels: field.x_labels }, { col: y.index, labels: field.y_labels }] : null;
+}
+
+/** Inputs of a run that can go on an axis: numbers and categories, not dates */
+export function axisInputs(inputs: { index: number; name: string; kind: Kind }[]) {
+  return inputs
+    .filter((i) => i.kind === "numeric" || i.kind === "category" || i.kind === "binary")
+    .map((i) => ({ index: i.index, name: i.name, cat: i.kind !== "numeric" }));
+}
+
+/** The bands a column gets on the chart, in the order the server encodes them */
+export function bandLabels(c: ColumnInfo, kind: Kind): string[] | null {
+  if (kind === "binary") return c.categories.map(([v]) => v).sort();
+  if (kind !== "category") return null;
+  const out = c.categories.slice(0, 30).map(([v]) => v);
+  if (c.missing > 0) out.push("(missing)");
+  if (c.distinct > 30) out.push("(other)");
   return out;
 }
 
@@ -47,13 +81,13 @@ export function PlaneSelect({
   onChange,
   disabled,
 }: {
-  /** Number columns that can go on an axis, by column index */
-  feats: { index: number; name: string }[];
+  /** Columns that can go on an axis, by column index */
+  feats: { index: number; name: string; cat?: boolean }[];
   plane: [number, number];
   onChange: (p: [number, number]) => void;
   disabled?: boolean;
 }) {
-  if (feats.length < 3) return null;
+  if (feats.length < 2) return null;
   const pick = (axis: 0 | 1, v: number) => {
     const next: [number, number] = [...plane];
     next[axis] = v;
@@ -72,7 +106,7 @@ export function PlaneSelect({
             onChange={(e) => pick(i as 0 | 1, +(e.currentTarget as HTMLSelectElement).value)}
           >
             {feats.map((f) => (
-              <option value={f.index}>{f.name}</option>
+              <option value={f.index}>{f.cat ? `${f.name} (category)` : f.name}</option>
             ))}
           </select>
         </label>
@@ -105,7 +139,9 @@ export function ChartKey({
   stations,
   vRange,
   targetName,
+  banded,
 }: {
+  banded?: boolean;
   spec: TargetSpec | null;
   stations: { v: number }[];
   vRange: [number, number];
@@ -134,7 +170,7 @@ export function ChartKey({
               <path d="M2 7A4 4 0 0 0 10 7Z" class="k-semi" />
               <path d="M14 7L22 7L18 1Z" class="k-tri" />
             </svg>
-            front at p = 0.5, triangles face the {zero} side
+            {banded ? "p = 0.5 inside a band" : "front at p = 0.5"}, triangles face the {zero} side
           </div>
         </>
       ) : (
@@ -145,10 +181,17 @@ export function ChartKey({
           <span class="muted">{targetName} per row</span>
         </div>
       )}
-      <div class="key-item">
-        <svg viewBox="0 0 24 14" aria-hidden="true"><path d="M0 9C8 3 16 11 24 5" class="k-iso" /></svg>
-        isolines, labelled with the prediction
-      </div>
+      {banded ? (
+        <div class="key-item">
+          <svg viewBox="0 0 24 14" aria-hidden="true"><rect x="2" y="1" width="9" height="12" class="k-band-cold" /><rect x="13" y="1" width="9" height="12" class="k-band-warm" /></svg>
+          one band per category, shading is the prediction
+        </div>
+      ) : (
+        <div class="key-item">
+          <svg viewBox="0 0 24 14" aria-hidden="true"><path d="M0 9C8 3 16 11 24 5" class="k-iso" /></svg>
+          isolines, labelled with the prediction
+        </div>
+      )}
     </section>
   );
 }

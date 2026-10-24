@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Field } from "../api";
+import { Bands } from "./Bands";
 import { contour, length, niceLevels, sample, walk, type Pt } from "./contour";
+import { COLD, PAPER, WARM, mix, pad, readoutHint, stationColour, useTween } from "./paper";
 import { fmt, fmtP, useWidth } from "../util";
 
+/** A data row on the chart. On a category axis the coordinate is the band index. */
 export interface Station {
   x: number;
   y: number;
   v: number;
 }
 
-interface Props {
+export interface SurfaceProps {
   field: Field | null;
   stations: Station[];
   binary: boolean;
@@ -21,22 +24,26 @@ interface Props {
   height: number;
   /** Value range of the target, colours regression stations */
   vRange: [number, number];
-  probe?: [number, number] | null;
-  onProbe?: (x: number, y: number) => void;
+  /** Bands of a category axis when there is no field yet */
+  xLabels?: string[] | null;
+  yLabels?: string[] | null;
+  probe?: [number | string, number | string] | null;
+  onProbe?: (x: number | string, y: number | string) => void;
   label: string;
 }
 
+/** Two number axes draw contours, any category axis draws bands */
+export function Surface(p: SurfaceProps) {
+  const banded = p.field ? !!(p.field.x_labels || p.field.y_labels) : !!(p.xLabels || p.yLabels);
+  return banded ? <Bands {...p} /> : <Contours {...p} />;
+}
+
 const M = { l: 48, r: 14, t: 14, b: 36 };
-const TWEEN_MS = 160;
 // Tried in this order, a level is kept only when it runs clear of the ones already kept,
 // so a sharp, converged field still reads as a few spaced lines instead of a stack
 const BINARY_LEVELS = [0.5, 0.1, 0.9, 0.25, 0.75, 0.02, 0.98, 0.01, 0.99];
 // 18 px on a desktop plot, shrinking on a phone so the outer levels survive there too
 const gapFor = (w: number) => Math.max(7, Math.min(18, w / 40));
-const COLD = [36, 89, 168];
-const WARM = [210, 54, 43];
-const PAPER = [233, 238, 242];
-
 /** Chaikin corner cutting, takes the marching squares stair steps off a line */
 function smooth(l: Pt[], rounds = 2): Pt[] {
   let cur = l;
@@ -55,68 +62,19 @@ function smooth(l: Pt[], rounds = 2): Pt[] {
   return cur;
 }
 
-const easeOut = (t: number) => 1 - Math.pow(2, -10 * t);
-
-function pad([lo, hi]: [number, number]): [number, number] {
-  const span = hi > lo ? hi - lo : 1;
-  return [lo - span * 0.08, hi + span * 0.08];
-}
-
-/** The field shown on screen, eased towards each new one so fronts move instead of jump */
-function useTween(field: Field | null): Float64Array | null {
-  const [shown, setShown] = useState<Float64Array | null>(null);
-  const from = useRef<Float64Array | null>(null);
-  const plane = useRef("");
-
-  useEffect(() => {
-    if (!field) {
-      from.current = null;
-      setShown(null);
-      return;
-    }
-    const target = Float64Array.from(field.values);
-    const id = `${field.x}:${field.y}:${field.res}`;
-    const start = from.current;
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (!start || start.length !== target.length || plane.current !== id || reduce) {
-      plane.current = id;
-      from.current = target;
-      setShown(target);
-      return;
-    }
-    const t0 = performance.now();
-    let raf = 0;
-    const tick = (now: number) => {
-      const k = easeOut(Math.min(1, (now - t0) / TWEEN_MS));
-      const cur = new Float64Array(target.length);
-      for (let i = 0; i < cur.length; i++) cur[i] = start[i]! + (target[i]! - start[i]!) * k;
-      from.current = cur;
-      setShown(cur);
-      if (k < 1) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [field]);
-
-  return shown;
-}
-
-function mix(a: number[], b: number[], k: number) {
-  return a.map((v, i) => Math.round(v + (b[i]! - v) * k));
-}
-
-export function Surface(p: Props) {
+function Contours(p: SurfaceProps) {
   const [wrap, width] = useWidth<HTMLDivElement>();
   const canvas = useRef<HTMLCanvasElement>(null);
   const values = useTween(p.field);
   const [hover, setHover] = useState<[number, number] | null>(null);
+  const field = p.field;
   const lastProbe = useRef(0);
 
   const W = Math.max(width - M.l - M.r, 10);
   const H = Math.max(p.height - M.t - M.b, 10);
-  const [x0, x1] = p.field ? p.field.x_range : pad(p.xRange);
-  const [y0, y1] = p.field ? p.field.y_range : pad(p.yRange);
-  const res = p.field?.res ?? 2;
+  const [x0, x1] = field?.x_range ?? pad(p.xRange);
+  const [y0, y1] = field?.y_range ?? pad(p.yRange);
+  const res = field?.nx ?? 2;
   const px = (x: number) => M.l + ((x - x0) / (x1 - x0)) * W;
   const py = (y: number) => M.t + H - ((y - y0) / (y1 - y0)) * H;
   const gpx = (g: Pt): Pt => [M.l + (g[0] / (res - 1)) * W, M.t + H - (g[1] / (res - 1)) * H];
@@ -125,7 +83,7 @@ export function Surface(p: Props) {
     y0 + ((M.t + H - cy) / H) * (y1 - y0),
   ];
   const at = (x: number, y: number) =>
-    values ? sample(values, res, ((x - x0) / (x1 - x0)) * (res - 1), ((y - y0) / (y1 - y0)) * (res - 1)) : null;
+    values ? sample(values, res, res, ((x - x0) / (x1 - x0)) * (res - 1), ((y - y0) / (y1 - y0)) * (res - 1)) : null;
 
   let lo = 0;
   let hi = 1;
@@ -320,11 +278,6 @@ export function Surface(p: Props) {
       );
     });
 
-  const stationColour = (v: number) => {
-    const k = p.vRange[1] > p.vRange[0] ? (v - p.vRange[0]) / (p.vRange[1] - p.vRange[0]) : 0.5;
-    const c = mix(k < 0.5 ? COLD : PAPER, k < 0.5 ? PAPER : WARM, k < 0.5 ? k * 2 : (k - 0.5) * 2);
-    return `rgb(${c.join(",")})`;
-  };
 
   const move = (e: PointerEvent) => {
     const r = (e.currentTarget as SVGElement).getBoundingClientRect();
@@ -341,6 +294,7 @@ export function Surface(p: Props) {
       p.onProbe(raw[0], raw[1]);
     }
   };
+  const probeAt = p.probe ? ([Number(p.probe[0]), Number(p.probe[1])] as const) : null;
   const down = (e: PointerEvent) => {
     if (!p.onProbe) return;
     const r = (e.currentTarget as SVGElement).getBoundingClientRect();
@@ -350,7 +304,6 @@ export function Surface(p: Props) {
   };
 
   const hv = hover ? at(hover[0], hover[1]) : null;
-  const coarse = window.matchMedia("(pointer: coarse)").matches;
 
   return (
     <div class={`surface${p.onProbe ? " probing" : ""}`} ref={wrap} style={{ height: p.height }}>
@@ -390,13 +343,13 @@ export function Surface(p: Props) {
             p.binary ? (
               <circle cx={px(s.x)} cy={py(s.y)} r={4.2} class={s.v >= 0.5 ? "one" : "zero"} />
             ) : (
-              <circle cx={px(s.x)} cy={py(s.y)} r={4.2} class="val" fill={stationColour(s.v)} />
+              <circle cx={px(s.x)} cy={py(s.y)} r={4.2} class="val" fill={stationColour(s.v, p.vRange)} />
             ),
           )}
         </g>
         {labels}
-        {p.probe && (
-          <g class="probe-mark" transform={`translate(${px(p.probe[0])} ${py(p.probe[1])})`}>
+        {probeAt && Number.isFinite(probeAt[0]) && Number.isFinite(probeAt[1]) && (
+          <g class="probe-mark" transform={`translate(${px(probeAt[0])} ${py(probeAt[1])})`}>
             <circle r={11} />
             <line x1={-17} x2={-6} />
             <line x1={6} x2={17} />
@@ -414,13 +367,7 @@ export function Surface(p: Props) {
             {hv !== null && <span>{p.binary ? "p" : "ŷ"} <b>{p.binary ? fmtP(hv) : fmt(hv, 3)}</b></span>}
           </>
         ) : (
-          <span class="hint">{coarse
-              ? p.onProbe
-                ? "Tap or drag on the chart to probe a point"
-                : "Tap the chart to read the field"
-              : p.onProbe
-                ? "Click or drag on the chart to probe a point"
-                : "Point at the chart to read the field"}</span>
+          <span class="hint">{readoutHint(!!p.onProbe)}</span>
         )}
       </div>
     </div>

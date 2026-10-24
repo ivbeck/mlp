@@ -3,7 +3,7 @@ import { Surface } from "../charts/Surface";
 import { activeRun, control, isLive, selectRun, set, setPlane, startRun, type State, type View } from "../store";
 import { LOSSES, OPTIMIZERS, fmt, fmtInt, label } from "../util";
 import { DraftSettings } from "./Settings";
-import { ChartKey, PlaneSelect, STATE_TEXT, archLine, stationsFor, targetRange } from "./shared";
+import { ChartKey, PlaneSelect, STATE_TEXT, archLine, axisInputs, fieldAxes, stationsFor, targetRange } from "./shared";
 
 const LOSS_SHORT: Record<string, string> = { bce: "BCE", mse: "MSE", mae: "MAE", huber: "Huber" };
 
@@ -41,7 +41,8 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
   const field = frame?.field ?? null;
   const shownEpoch = s.scrub ?? last?.epoch ?? 0;
   const rec = run.history.find((r) => r.epoch === shownEpoch) ?? last;
-  const nums = sum.inputs.filter((i) => i.kind === "numeric");
+  const nums = axisInputs(sum.inputs);
+  const axes = field ? fieldAxes(field, sum.inputs) : null;
   const xc = field ? sum.inputs[field.x] : undefined;
   const yc = field ? sum.inputs[field.y] : undefined;
   const sameData = !!s.dataset && s.dataset.id === c.dataset_id;
@@ -49,7 +50,7 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
   const vRange: [number, number] = sameData ? targetRange(s.dataset!, c.target, sum.target) : [0, 1];
   const others = s.runs.filter((r) => r !== run && r.summary.config.loss === c.loss && r.summary.config.dataset_id === c.dataset_id);
   const progress = last ? last.epoch / c.epochs : 0;
-  const stations = field && xc && yc && sameData ? stationsFor(s.dataset!, xc.index, yc.index, c.target, sum.target) : [];
+  const stations = axes && sameData ? stationsFor(s.dataset!, axes[0], axes[1], c.target, sum.target) : [];
   const controls = live ? (
     <div class="btns">
       {sum.state === "running" ? (
@@ -93,8 +94,8 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
             field={field}
             stations={stations}
             binary={sum.binary_target}
-            xRange={field.x_range}
-            yRange={field.y_range}
+            xRange={field.x_range ?? [0, 1]}
+            yRange={field.y_range ?? [0, 1]}
             vRange={vRange}
             xName={xc?.name ?? "x"}
             yName={yc?.name ?? "y"}
@@ -105,7 +106,7 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
           <div class="empty tall">
             <p>
               {nums.length < 2
-                ? "The chart needs two inputs used as numbers. The barograph below still tracks the run."
+                ? "The chart needs two inputs that are numbers or categories. The barograph below still tracks the run."
                 : "Waiting for the first field from the server."}
             </p>
           </div>
@@ -162,7 +163,7 @@ export function TrainView({ s, go }: { s: State; go: (v: View) => void }) {
             <p class={n.level === "warn" ? "note warn" : "note"}>{n.text}</p>
           ))}
         </section>
-        {field && <ChartKey spec={sum.target} stations={stations} vRange={vRange} targetName={sum.target_name} />}
+        {field && <ChartKey banded={!!(field?.x_labels || field?.y_labels)} spec={sum.target} stations={stations} vRange={vRange} targetName={sum.target_name} />}
         {s.runs.length > 1 && (
           <section>
             <div class="lab">Runs</div>

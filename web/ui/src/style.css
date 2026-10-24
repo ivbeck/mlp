@@ -366,3 +366,10 @@ ul.hints li::before { content: ""; position: absolute; left: 0; top: .5em; width
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; }
 }
+
+/* category bands */
+.band-front .front-cold { stroke-dasharray: none; }
+.band-front .front-warm, .band-front .front-cold { stroke-width: 2.4; }
+.cell-val { font-size: 12px; font-weight: 600; fill: var(--ink); pointer-events: none; paint-order: stroke; stroke: var(--paper); stroke-width: 3px; stroke-linejoin: round; }
+.k-band-cold { fill: #b9c8dc; stroke: var(--ink); stroke-width: .8; }
+.k-band-warm { fill: #e4bdb9; stroke: var(--ink); stroke-width: .8; }

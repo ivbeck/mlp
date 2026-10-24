@@ -2,10 +2,10 @@ import { useState } from "preact/hooks";
 import type { ColumnInfo, Kind } from "../api";
 import { Surface } from "../charts/Surface";
 import {
+  featureColumns,
   kindOf,
   loadExample,
   loadFile,
-  numericColumns,
   setDraft,
   setHeader,
   setKind,
@@ -16,7 +16,7 @@ import {
   type View,
 } from "../store";
 import { bytes, fmtInt, fmtShort } from "../util";
-import { KIND_TEXT, PlaneSelect, stationsFor, targetRange } from "./shared";
+import { KIND_TEXT, PlaneSelect, bandLabels, stationsFor, targetRange } from "./shared";
 
 function summary(c: ColumnInfo, rows: number): string {
   if (c.min !== null && c.max !== null && c.categories.length > 2 && c.distinct > 12) {
@@ -30,12 +30,16 @@ function summary(c: ColumnInfo, rows: number): string {
 export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
   if (!s.dataset) return <Empty busy={!!s.busy} />;
   const d = s.dataset;
-  const nums = numericColumns(s);
+  const axisCols = featureColumns(s)
+    .filter((c) => ["numeric", "category", "binary"].includes(kindOf(c, s)))
+    .map((c) => ({ index: c.index, name: c.name, cat: kindOf(c, s) !== "numeric" }));
   const target = s.target !== null ? d.columns[s.target] : undefined;
   const spec = s.encoding?.target ?? null;
   const xc = d.columns[s.plane[0]];
   const yc = d.columns[s.plane[1]];
-  const canPlot = !!(xc && yc && target && xc !== yc && nums.includes(xc) && nums.includes(yc));
+  const canPlot = !!(xc && yc && target && xc !== yc && axisCols.some((a) => a.index === xc.index) && axisCols.some((a) => a.index === yc.index));
+  const xLabels = xc ? bandLabels(xc, kindOf(xc, s)) : null;
+  const yLabels = yc ? bandLabels(yc, kindOf(yc, s)) : null;
   const enc = s.encoding;
   const wide = enc?.inputs.filter((i) => i.width > 1) ?? [];
 
@@ -49,12 +53,14 @@ export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
           <span class="meta">
             {d.rows > d.sample.length ? `first ${fmtInt(d.sample.length)} of ${fmtInt(d.rows)} rows plotted` : `${fmtInt(d.rows)} rows plotted`}
           </span>
-          <PlaneSelect feats={nums} plane={s.plane} onChange={(p) => void setPlane(p)} />
+          <PlaneSelect feats={axisCols} plane={s.plane} onChange={(p) => void setPlane(p)} />
         </div>
         {canPlot ? (
           <Surface
             field={null}
-            stations={stationsFor(d, xc.index, yc.index, target.index, spec)}
+            stations={stationsFor(d, { col: xc.index, labels: xLabels }, { col: yc.index, labels: yLabels }, target.index, spec)}
+            xLabels={xLabels}
+            yLabels={yLabels}
             binary={spec?.kind === "binary"}
             xRange={[xc.min ?? 0, xc.max ?? 1]}
             yRange={[yc.min ?? 0, yc.max ?? 1]}
@@ -66,7 +72,7 @@ export function DataView({ s, go }: { s: State; go: (v: View) => void }) {
           />
         ) : (
           <div class="empty">
-            <p>The chart needs two columns used as numbers. Training works without it.</p>
+            <p>The chart needs two columns that are numbers or categories. Training works without it.</p>
           </div>
         )}
         <div class="table-wrap">

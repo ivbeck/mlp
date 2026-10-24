@@ -121,12 +121,51 @@ pub struct Snapshot {
 pub struct Field {
     pub x: usize,
     pub y: usize,
-    /// Raw (unnormalized) feature ranges covered
-    pub x_range: (f64, f64),
-    pub y_range: (f64, f64),
-    pub res: usize,
-    /// Row major from (`x_min`, `y_min`), network output
+    /// Raw (unnormalized) range of a number axis, None on a category axis
+    pub x_range: Option<(f64, f64)>,
+    pub y_range: Option<(f64, f64)>,
+    /// The values along a category axis, one band each, None on a number axis
+    pub x_labels: Option<Vec<String>>,
+    pub y_labels: Option<Vec<String>>,
+    pub nx: usize,
+    pub ny: usize,
+    /// Row major from (`x_min`, `y_min`), ny rows of nx, network output
     pub values: Vec<f64>,
+}
+
+/// What one chart axis sweeps: a padded number range or every value of a category
+#[derive(Debug, Clone)]
+enum Axis {
+    Num(f64, f64),
+    Cat(Vec<String>),
+}
+
+impl Axis {
+    #[allow(clippy::cast_precision_loss)]
+    fn steps(&self) -> Vec<Cell> {
+        match self {
+            Self::Num(lo, hi) => {
+                let (lo, hi) = pad((*lo, *hi));
+                let step = (FIELD_RES - 1) as f64;
+                (0..FIELD_RES)
+                    .map(|i| Cell::Num((hi - lo).mul_add(i as f64 / step, lo)))
+                    .collect()
+            }
+            Self::Cat(labels) => labels.iter().map(|l| Cell::Text(l.clone())).collect(),
+        }
+    }
+    fn range(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::Num(lo, hi) => Some(pad((*lo, *hi))),
+            Self::Cat(_) => None,
+        }
+    }
+    fn labels(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Num(..) => None,
+            Self::Cat(l) => Some(l.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -210,9 +249,9 @@ impl RunHandle {
     ///
     /// Indices out of range or equal
     pub fn set_plane(&self, x: usize, y: usize) -> Result<Snapshot> {
-        let numeric = |i: usize| self.plane.ranges.get(i).copied().flatten().is_some();
-        if x == y || !numeric(x) || !numeric(y) {
-            anyhow::bail!("The chart needs two different number columns");
+        let usable = |i: usize| self.plane.axes.get(i).is_some_and(Option::is_some);
+        if x == y || !usable(x) || !usable(y) {
+            anyhow::bail!("The chart needs two different columns that are numbers or categories");
         }
         *lock(&self.plane.plane) = Some((x, y));
         let mut m = lock(&self.model);
@@ -482,15 +521,15 @@ fn snapshot(model: &mut Model, epoch: usize, p: &FieldPlane) -> Snapshot {
     };
     let plane = *lock(&p.plane);
     let field = plane.and_then(|(x, y)| {
-        let (x0, x1) = pad(p.ranges.get(x).copied().flatten()?);
-        let (y0, y1) = pad(p.ranges.get(y).copied().flatten()?);
+        let ax = p.axes.get(x)?.as_ref()?;
+        let ay = p.axes.get(y)?.as_ref()?;
+        let (xs, ys) = (ax.steps(), ay.steps());
         let mut raw = p.defaults.clone();
-        let mut values = Vec::with_capacity(FIELD_RES * FIELD_RES);
-        let step = (FIELD_RES - 1) as f64;
-        for j in 0..FIELD_RES {
-            raw[y] = Cell::Num((y1 - y0).mul_add(j as f64 / step, y0));
-            for i in 0..FIELD_RES {
-                raw[x] = Cell::Num((x1 - x0).mul_add(i as f64 / step, x0));
+        let mut values = Vec::with_capacity(xs.len() * ys.len());
+        for yv in &ys {
+            raw[y] = yv.clone();
+            for xv in &xs {
+                raw[x] = xv.clone();
                 let input = model.to_net_input(&raw);
                 values.push(model.mlp.predict(&input)[0]);
             }
@@ -498,9 +537,12 @@ fn snapshot(model: &mut Model, epoch: usize, p: &FieldPlane) -> Snapshot {
         Some(Field {
             x,
             y,
-            x_range: (x0, x1),
-            y_range: (y0, y1),
-            res: FIELD_RES,
+            x_range: ax.range(),
+            y_range: ay.range(),
+            x_labels: ax.labels(),
+            y_labels: ay.labels(),
+            nx: xs.len(),
+            ny: ys.len(),
             values,
         })
     });
@@ -520,8 +562,8 @@ fn pad((lo, hi): (f64, f64)) -> (f64, f64) {
 #[derive(Debug)]
 pub struct FieldPlane {
     plane: Mutex<Option<(usize, usize)>>,
-    /// Raw min/max per input column, None for the ones that are not numbers
-    ranges: Vec<Option<(f64, f64)>>,
+    /// What each input sweeps on the chart, None for inputs that can not be an axis (dates)
+    axes: Vec<Option<Axis>>,
     /// Where every input sits when it is not on the chart: mean or most common value
     defaults: Vec<Cell>,
 }
@@ -538,23 +580,27 @@ pub fn start(
 ) -> Result<RunHandle> {
     let p = prepare(id, config, stored)?;
     let inputs = &p.summary.inputs;
-    let ranges: Vec<Option<(f64, f64)>> = inputs
+    let axes: Vec<Option<Axis>> = inputs
         .iter()
         .map(|i| match (i.kind, i.min, i.max) {
-            (Kind::Numeric, Some(lo), Some(hi)) => Some((lo, hi)),
+            (Kind::Numeric, Some(lo), Some(hi)) => Some(Axis::Num(lo, hi)),
+            (Kind::Binary | Kind::Category, _, _) if i.options.len() >= 2 => Some(Axis::Cat(i.options.clone())),
             _ => None,
         })
         .collect();
-    let numeric: Vec<usize> = (0..ranges.len()).filter(|&i| ranges[i].is_some()).collect();
+    let usable: Vec<usize> = (0..axes.len()).filter(|&i| axes[i].is_some()).collect();
+    let numeric: Vec<usize> = (0..axes.len())
+        .filter(|&i| matches!(axes[i], Some(Axis::Num(..))))
+        .collect();
     let plane = p
         .summary
         .config
         .plane
-        .filter(|(x, y)| x != y && numeric.contains(x) && numeric.contains(y))
+        .filter(|(x, y)| x != y && usable.contains(x) && usable.contains(y))
         .or_else(|| (numeric.len() >= 2).then(|| (numeric[0], numeric[1])));
     let field_plane = Arc::new(FieldPlane {
         plane: Mutex::new(plane),
-        ranges,
+        axes,
         defaults: inputs.iter().map(|i| i.default.clone()).collect(),
     });
     let (events, _) = broadcast::channel(4096);

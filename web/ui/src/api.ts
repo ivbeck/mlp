@@ -97,9 +97,14 @@ export interface EpochRecord {
 export interface Field {
   x: number;
   y: number;
-  x_range: [number, number];
-  y_range: [number, number];
-  res: number;
+  /** Raw range of a number axis, null on a category axis */
+  x_range: [number, number] | null;
+  y_range: [number, number] | null;
+  /** One band per value on a category axis, null on a number axis */
+  x_labels: string[] | null;
+  y_labels: string[] | null;
+  nx: number;
+  ny: number;
   values: number[];
 }
 
